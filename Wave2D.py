@@ -3,6 +3,8 @@ import sympy as sp
 import scipy.sparse as sparse
 import matplotlib.pyplot as plt
 from matplotlib import cm
+import matplotlib.animation as animation
+from os import system as sys
 
 x, y, t = sp.symbols('x,y,t')
 
@@ -16,9 +18,9 @@ class Wave2D:
     def D2(self, N: int) -> sparse.lil_matrix:
         """Return second order differentiation matrix"""
         D = sparse.diags([1, -2, 1], [-1, 0, 1], shape=(N + 1, N + 1), format='lil')
-        D[0, :4] = 2, -5, 4, -1
-        D[-1] = D[0][::-1]
-        return D
+        D[0] = 0
+        D[-1] = 0
+        return D/ self.h**2
 
     @property
     def w(self) -> float:
@@ -39,7 +41,7 @@ class Wave2D:
         mx, my : int
             Parameters for the standing wave
         """
-        self.U_prev = sp.lambdify((x, y, t), self.ue(mx, my))(self.xij, self.yij, 0)
+        self.U_prev = sp.lambdify((x, y), self.ue(mx, my).subs(t, 0))(self.xij, self.yij)
         self.U = self.U_prev + 1/2 * (self.c * self.dt)**2 * (self.D @ self.U_prev + self.U_prev @ self.D.T)
         
     @property
@@ -57,17 +59,13 @@ class Wave2D:
         t0 : number
             The time of the comparison
         """
-        ue = sp.lambdify((x, y), self.ue(self.kx, self.ky).subs(t, t0), 'numpy')(self.xij, self.yij)
+        ue = sp.lambdify((x, y), self.ue(self.mx, self.my).subs(t, t0), 'numpy')(self.xij, self.yij)
         return np.sqrt(np.sum((u - ue)**2) * self.h**2)
 
     def apply_bcs(self):
         """Apply boundary conditions"""
-        top = np.array([i for i in range(self.N+1)])
-        bottom = top + (self.N+1) * self.N
-        left = np.array([i*(self.N+1) for i in range(1, self.N)])
-        right = left + self.N
-        indices = np.concatenate([top, bottom, left, right])
-        self.U.flat[indices] = 0
+        # Boundary conditions applied in self.D2()
+        ...
 
     def __call__(self, N, Nt, cfl=0.5, c=1.0, mx=3, my=3, store_data=-1):
         """Solve the wave equation
@@ -98,21 +96,30 @@ class Wave2D:
         self.h = 1/N
         self.cfl = cfl
         self.c = c
+        self.mx = mx
+        self.my = my
         self.kx = mx*np.pi
         self.ky = my*np.pi
         
         self.create_mesh(N)
         self.D = self.D2(N)
-        self.initialize(N, mx, my)
-        self.apply_bcs()
         
-        errors = []
+        self.initialize(N, mx, my)
+        
+        U_t = np.zeros((Nt, N+1, N+1))
+        U_t[0] = self.U_prev
         for n in range(1, Nt): 
             self.U_next = 2*self.U - self.U_prev + (c*self.dt)**2 * (self.D @ self.U + self.U @ self.D.T)
-            self.U_prev, self.U = self.U, self.U_next
-            errors.append(self.l2_error(self.U, n*self.dt))
+            self.U_prev = self.U
+            self.U = self.U_next
+            U_t[n] = self.U_next
+            
+        if store_data > 0:
+            return {n: U_t[n] for n in range(0, Nt, store_data)}
         
-        return self.h, errors    
+        else:
+            l2_err = self.l2_error(self.U_next, Nt*self.dt)
+            return self.h, l2_err   
         
             
         
@@ -143,7 +150,7 @@ class Wave2D:
         N0 = 8
         for m in range(m):
             dx, err = self(N0, Nt, cfl=cfl, mx=mx, my=my, store_data=-1)
-            E.append(err[-1])
+            E.append(err)
             h.append(dx)
             N0 *= 2
             Nt *= 2
@@ -153,17 +160,21 @@ class Wave2D:
 class Wave2D_Neumann(Wave2D):
 
     def D2(self, N: int) -> sparse.lil_matrix:
-        D = super().D2(N)
-        D[0:, :2] = -2, 2
-        D[-1] = D[0][::-1]
+        D = sparse.diags([1, -2, 1], [-1, 0, 1], shape=(N + 1, N + 1), format='lil')
+        D[0, :2] = -2, 2
+        D[-1, -2:] = 2, -2
+        D /= self.h**2
         return D
         
 
     def ue(self, mx, my):
-        raise NotImplementedError
+        kx = mx*sp.pi
+        ky = my*sp.pi
+        return sp.cos(kx*x)*sp.cos(ky*y)*sp.cos(self.w*t)
 
     def apply_bcs(self):
-        raise NotImplementedError
+        # Boundary conditions applied in self.D2()
+        ...
 
 def test_convergence_wave2d():
     sol = Wave2D()
@@ -176,11 +187,68 @@ def test_convergence_wave2d_neumann():
     assert abs(r[-1]-2) < 0.05
 
 def test_exact_wave2d():
-    raise NotImplementedError
+    sol = Wave2D()
+    solN = Wave2D_Neumann()
+    
+    tol = 1e-12
+    
+    cfl = 1/np.sqrt(2)
+    Nt = 64 
+    N = 64
+    
+    mx = 3
+    my = 3
+    
+    _, error_dirch = sol(N, Nt, cfl=cfl, mx=mx, my=my, store_data=-1)
+    _, error_neumann = solN(N, Nt, cfl=cfl, mx=mx, my=my, store_data=-1)
+    
+    assert error_dirch < tol
+    assert error_neumann < tol
 
+def create_gif(bound_cond: str, filename: str) -> None:
+    '''
+    Creates a gif of the wave equation solution
+    
+    Parameters
+    ----------
+    bound_cond : str
+        The boundary condition to use. Either 'dirchlet' or 'neumann'
+    filename : str
+        The name of the gif file to create. No file extension needed.
+    '''
+    
+    N = 256
+    Nt = 175
+    cfl = 1/np.sqrt(2)
+    mx = 3
+    my = 3
+    
+    if bound_cond == 'dirchlet':
+        sol = Wave2D()
+        
+    elif bound_cond == 'neumann':
+        sol = Wave2D_Neumann()
+        
+    data = sol(N, Nt, cfl=cfl, mx=mx, my=my, store_data=1)
+    fig = plt.figure()
+    ax = fig.add_subplot(111, projection='3d')
+    frames = []
+    for n, u in data.items():
+        if n % 2 == 0: 
+            continue
+        
+        frame = ax.plot_surface(sol.xij, sol.yij, u, vmin=-0.5*data[0].max(), vmax=data[0].max(), cmap=cm.coolwarm, linewidth=0, antialiased=False)
+        frames.append([frame])
+
+    ani = animation.ArtistAnimation(fig, frames, interval=100, blit=True)
+    ani.save(f'{filename}.gif', writer='pillow', fps=30) 
+        
+    
 
 if __name__ == "__main__":
     test_convergence_wave2d()
-    # test_convergence_wave2d_neumann()
-    # test_exact_wave2d()
+    test_convergence_wave2d_neumann()
+    test_exact_wave2d()
     print("All tests passed")
+    create_gif(bound_cond='dirchlet', filename='dirchlet')
+    create_gif(bound_cond='neumann', filename='neumannwave')
