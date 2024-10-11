@@ -250,5 +250,5 @@ if __name__ == "__main__":
     test_convergence_wave2d_neumann()
     test_exact_wave2d()
     print("All tests passed")
-    create_gif(bound_cond='dirchlet', filename='dirchlet')
+    create_gif(bound_cond='dirichlet', filename='dirchlet')
     create_gif(bound_cond='neumann', filename='neumannwave')
